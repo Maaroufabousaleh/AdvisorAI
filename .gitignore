@@ -1,0 +1,7 @@
+data/
+.env
+src/data_cloud/__init__.py
+__pycache__/
+.vscode/
+last_run.txt
+*.pyc

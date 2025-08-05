@@ -1,0 +1,80 @@
+services:
+  # ────────────────────────────────
+  # 1) Web service: API + nginx
+  # ────────────────────────────────
+  - type: web
+    name: advisorai-complete
+    env: docker
+    plan: free
+    instanceCount: 1
+    dockerfilePath: deployment/Dockerfile
+    dockerContext: .
+    # Health check configuration
+    healthCheckPath: /health
+    healthCheckInterval: 60s  # Longer interval for free plan
+    healthCheckTimeout: 15s
+    healthCheckThreshold: 5   # More lenient for free plan
+    # Environment variables
+    envVars:
+      - key: PORT
+        value: "80"
+      - key: API_PORT
+        value: "10000"
+      - key: PYTHONPATH
+        value: "/app:/app/src:/app/src/api:/app/src/data_cloud:/app/src/fetchers:/app/src/merge"
+      - key: MAX_MEMORY_MB
+        value: "512"  # Lower limit for free plan
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONIOENCODING
+        value: "utf-8"
+      - key: TRIGGER_PING_INTERVAL
+        value: "600"  # Less frequent pinging for free plan
+    # Auto-deploy settings
+    autoDeploy: true
+    # Build settings
+    buildFilter:
+      paths:
+        - src/**
+        - deployment/**
+        - requirements.txt
+        - Dockerfile
+
+  # ────────────────────────────────
+  # 2) Worker service: pipeline scheduler & backup
+  # ────────────────────────────────
+  - type: worker
+    name: advisorai-scheduler
+    env: docker
+    plan: free
+    instanceCount: 1
+    dockerfilePath: deployment/Dockerfile
+    dockerContext: .
+    # override the default CMD – run your scheduler loop
+    command: ["python", "/app/deployment/scheduler.py"]
+    envVars:
+      - key: PYTHONPATH
+        value: "/app:/app/src:/app/src/api:/app/src/data_cloud:/app/src/fetchers:/app/src/merge"
+      - key: MAX_MEMORY_MB
+        value: "512"  # Lower limit for free plan
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PYTHONIOENCODING
+        value: "utf-8"
+      - key: TRIGGER_PING_INTERVAL
+        value: "600"  # Less frequent pinging for free plan
+      - key: MONGODB_URI
+        value: "<your-atlas-uri>"
+      - key: MONGODB_DATABASE
+        value: "AdvisorAI"
+      - key: MONGODB_COLLECTION_WAREHOUSE
+        value: "warehouse"
+    # Auto-deploy settings
+    autoDeploy: true
+    # Build settings
+    buildFilter:
+      paths:
+        - src/**
+        - deployment/**
+        - requirements.txt
+        - Dockerfile
