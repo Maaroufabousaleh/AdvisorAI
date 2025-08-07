@@ -800,7 +800,31 @@ class DataProcessor:
                     df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) else 'unknown')
                     logger.debug(f"Force converted problematic column {col} to string")
         
-        # 15. Final null value cleanup
+        # 15. Remove non-essential string columns for ML optimization
+        logger.info("Removing non-essential string columns for ML optimization...")
+        
+        # Essential columns to keep (needed for grouping, identification, etc.)
+        essential_string_cols = [
+            'symbol',  # Essential for grouping and identification
+            'interval_timestamp',  # Essential for time series
+        ]
+        
+        # Get all string/object columns
+        string_cols = df.select_dtypes(include=['object', 'string']).columns.tolist()
+        
+        # Identify columns to remove (non-essential string columns)
+        cols_to_remove = [col for col in string_cols if col not in essential_string_cols]
+        
+        if cols_to_remove:
+            original_shape = df.shape
+            df = df.drop(columns=cols_to_remove)
+            logger.info(f"Removed {len(cols_to_remove)} non-essential string columns")
+            logger.info(f"Shape changed from {original_shape} to {df.shape}")
+            logger.debug(f"Removed columns: {cols_to_remove}")
+        else:
+            logger.info("No non-essential string columns found to remove")
+        
+        # 16. Final null value cleanup
         remaining_nulls = df.isnull().sum()
         for col in remaining_nulls[remaining_nulls > 0].index:
             if df[col].dtype in ['float64', 'float32', 'int64', 'int32']:
@@ -808,7 +832,7 @@ class DataProcessor:
             else:
                 df[col] = df[col].fillna('unknown')
         
-        # 16. Add data quality metadata (JSON-serializable)
+        # 17. Add data quality metadata (JSON-serializable)
         df.attrs['quality_fixes_applied'] = {
             'timestamp': pd.Timestamp.now().isoformat(),  # Convert to ISO string for JSON compatibility
             'fixes': [
