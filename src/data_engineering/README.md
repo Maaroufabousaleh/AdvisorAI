@@ -26,9 +26,6 @@ Place your feature files in the `data/features/` directory:
 
 ### 3. Run the Processing Pipeline
 ```bash
-# Navigate to data engineering directory
-cd src/data_engineering
-
 # Process all data with default settings
 python main.py
 
@@ -52,14 +49,13 @@ python main.py --log-level DEBUG
 
 ### Basic Processing
 ```bash
-cd src/data_engineering
 python main.py
 ```
 
 ### Advanced Usage
 ```bash
 # Custom input/output directories
-python main.py --input-dir "../../my_data" --output-dir "../../my_results"
+python main.py --input-dir "my_data" --output-dir "my_results"
 
 # Save logs to file
 python main.py --log-file "processing.log"
@@ -70,7 +66,7 @@ python main.py --config custom_config.json --log-level DEBUG
 
 ## Configuration
 
-The system uses a JSON configuration file to control processing behavior. See `src/data_engineering/config.json` for the default configuration:
+The system uses a JSON configuration file to control processing behavior. See `config.json` for the default configuration:
 
 ```json
 {

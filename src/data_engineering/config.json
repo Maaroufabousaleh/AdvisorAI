@@ -1,0 +1,43 @@
+{
+  "data_paths": {
+    "input": "../../data/features",
+    "output": "../../data/processed"
+  },
+  "validation": {
+    "strict_mode": false,
+    "save_reports": true
+  },
+  "cleaning": {
+    "remove_duplicates": true,
+    "handle_missing": true,
+    "detect_outliers": true
+  },
+  "normalization": {
+    "stocks": {
+      "price_scaling": "minmax",
+      "volume_scaling": "log_standard",
+      "indicator_scaling": "standard",
+      "return_scaling": "standard"
+    },
+    "crypto": {
+      "price_scaling": "robust",
+      "volume_scaling": "log_standard", 
+      "indicator_scaling": "robust",
+      "return_scaling": "robust"
+    }
+  },
+  "outlier_handling": {
+    "method": "cap",
+    "preserve_extreme_moves": true
+  },
+  "missing_data": {
+    "price_strategy": "forward_fill",
+    "volume_strategy": "zero_fill",
+    "indicator_strategy": "interpolate",
+    "news_strategy": "neutral_fill"
+  },
+  "processing": {
+    "save_intermediate": true,
+    "parallel_processing": false
+  }
+}

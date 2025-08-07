@@ -14,4 +14,6 @@ numpy
 pydantic
 psutil
 beautifulsoup4
-scikit-learn
+scikit-learn>=1.0.0
+scipy>=1.7.0
+joblib>=1.0.0
