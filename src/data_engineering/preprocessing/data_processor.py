@@ -416,7 +416,38 @@ class DataProcessor:
                 except:
                     df_safe[col] = df_safe[col].apply(lambda x: str(x) if pd.notna(x) else 'unknown')
                     logger.debug(f"Force conversion of {col} to string for parquet save")
-        
+
+        # Reorder columns: ensure 'symbol' is first and a main timestamp (if present) is second
+        try:
+            cols = list(df_safe.columns)
+            symbol_col = 'symbol' if 'symbol' in cols else None
+
+            # Find candidate timestamp columns (prefer datetime dtypes, then by name)
+            ts_candidates = [c for c in cols if pd.api.types.is_datetime64_any_dtype(df_safe[c]) and ('timestamp' in c.lower() or 'datetime' in c.lower())]
+            if not ts_candidates:
+                # fallback to any column with 'timestamp' or 'datetime' in name
+                ts_candidates = [c for c in cols if ('timestamp' in c.lower() or 'datetime' in c.lower())]
+
+            main_ts = ts_candidates[0] if ts_candidates else None
+
+            new_order = []
+            if symbol_col:
+                new_order.append(symbol_col)
+            if main_ts and main_ts != symbol_col:
+                new_order.append(main_ts)
+
+            # Append remaining columns preserving original order
+            for c in cols:
+                if c not in new_order:
+                    new_order.append(c)
+
+            # Apply reorder if it changed
+            if new_order and new_order != cols:
+                df_safe = df_safe.loc[:, new_order]
+                logger.debug(f"Reordered columns: {new_order[:5]}{'...' if len(new_order)>5 else ''}")
+        except Exception as e:
+            logger.warning(f"Failed to reorder columns before saving: {e}")
+
         filepath = self.output_path / filename
         df_safe.to_parquet(filepath)
         logger.debug(f"Saved intermediate result: {filepath}")
@@ -700,12 +731,25 @@ class DataProcessor:
         timestamp_cols = [col for col in df.columns if 'timestamp' in col.lower()]
         for col in timestamp_cols:
             if col in df.columns and pd.api.types.is_datetime64_any_dtype(df[col]):
-                current_time = pd.Timestamp.now()
-                future_mask = df[col] > current_time
-                future_count = future_mask.sum()
-                if future_count > 0:
-                    df.loc[future_mask, col] = current_time
-                    logger.info(f"Fixed {future_count} future timestamps in {col}")
+                try:
+                    current_time = pd.Timestamp.now()
+                    # Handle timezone compatibility
+                    if hasattr(df[col].dtype, 'tz') and df[col].dtype.tz is not None:
+                        # Column is timezone-aware, make current_time timezone-aware too
+                        current_time = current_time.tz_localize('UTC')
+                    else:
+                        # Column is timezone-naive, ensure current_time is also timezone-naive
+                        current_time = current_time.tz_localize(None) if current_time.tz is not None else current_time
+                    
+                    future_mask = df[col] > current_time
+                    future_count = future_mask.sum()
+                    if future_count > 0:
+                        df.loc[future_mask, col] = current_time
+                        logger.info(f"Fixed {future_count} future timestamps in {col}")
+                except (TypeError, ValueError) as e:
+                    # If comparison fails due to timezone mismatch, skip this column
+                    logger.warning(f"Skipping future timestamp fix for {col} due to timezone mismatch: {e}")
+                    continue
         
         # 10. Ensure chronological timestamp ordering within symbols
         if 'interval_timestamp' in df.columns and 'symbol' in df.columns:
@@ -777,18 +821,73 @@ class DataProcessor:
                         df.loc[df[col] > upper_bound, col] = upper_bound[df[col] > upper_bound]
                         logger.info(f"Capped {outlier_count} outlier values in {col}")
         
-        # 14. Fix data type inconsistencies for parquet compatibility
-        logger.info("Fixing data types for parquet compatibility...")
+        # 14. Create primary datetime column before removing others
+        logger.info("Creating primary datetime column...")
         
-        # Get all columns that might have problematic object types
-        problematic_columns = [
-            'alpaca_merge_timestamp', 'datetime', 'feature_timestamp', 
-            'sentiment_timestamp', 'timestamp', 'timestamp_alpaca', 
-            'timestamp_dt', 'interval_timestamp_dt', 'latest_news_timestamp_x',
-            'latest_news_timestamp_y'
+        # Find the best timestamp column to use as primary datetime
+        potential_datetime_cols = [
+            'datetime', 'timestamp', 'feature_timestamp', 'interval_timestamp',
+            'alpaca_merge_timestamp', 'latest_news_timestamp'
         ]
         
-        # Convert all object columns to string for maximum compatibility
+        primary_datetime_col = None
+        for col in potential_datetime_cols:
+            if col in df.columns and not df[col].isnull().all():
+                primary_datetime_col = col
+                break
+        
+        if primary_datetime_col:
+            # Convert to Unix timestamp (numeric) for ML compatibility
+            df['datetime_unix'] = pd.to_datetime(df[primary_datetime_col], errors='coerce').astype('int64') // 10**9
+            logger.info(f"Created datetime_unix from {primary_datetime_col}")
+        
+        # 15. Remove non-essential string columns for ML optimization (before type conversion)
+        logger.info("Removing non-essential string columns for ML optimization...")
+        
+        # Essential columns to keep (needed for grouping, identification, etc.)
+        essential_string_cols = [
+            'symbol',  # Essential for grouping and identification
+        ]
+        
+        # Essential time features to preserve (already numeric)
+        essential_time_cols = [
+            'year', 'month', 'day_of_week', 'hour', 'is_weekend', 'is_trading_hours', 'datetime_unix'
+        ]
+        
+        # Get all string/object columns
+        string_cols = df.select_dtypes(include=['object', 'string']).columns.tolist()
+        
+        # Also remove timestamp and metadata columns by name pattern (regardless of dtype)
+        timestamp_patterns = [
+            'timestamp', '_timestamp', 'datetime', '_dt', 'merge_timestamp',
+            'feature_timestamp', 'alpaca_merge', 'interval_timestamp', 
+            'latest_news_timestamp', 'sentiment_timestamp', 'period'
+        ]
+        
+        pattern_cols_to_remove = []
+        for col in df.columns:
+            for pattern in timestamp_patterns:
+                if pattern in col.lower() and col not in essential_string_cols and col not in essential_time_cols:
+                    pattern_cols_to_remove.append(col)
+                    break
+        
+        # Combine string columns and pattern-matched columns, but preserve essential columns
+        cols_to_remove = list(set(string_cols + pattern_cols_to_remove))
+        cols_to_remove = [col for col in cols_to_remove if col not in essential_string_cols and col not in essential_time_cols]
+        
+        if cols_to_remove:
+            original_shape = df.shape
+            df = df.drop(columns=cols_to_remove)
+            logger.info(f"Removed {len(cols_to_remove)} non-essential string/timestamp columns")
+            logger.info(f"Shape changed from {original_shape} to {df.shape}")
+            logger.debug(f"Removed columns: {cols_to_remove}")
+        else:
+            logger.info("No non-essential string columns found to remove")
+
+        # 15. Fix data type inconsistencies for parquet compatibility
+        logger.info("Fixing data types for parquet compatibility...")
+        
+        # Convert remaining object columns to string for maximum compatibility
         for col in df.columns:
             if df[col].dtype == 'object':
                 try:
@@ -799,30 +898,6 @@ class DataProcessor:
                     # Force conversion by replacing problematic values
                     df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) else 'unknown')
                     logger.debug(f"Force converted problematic column {col} to string")
-        
-        # 15. Remove non-essential string columns for ML optimization
-        logger.info("Removing non-essential string columns for ML optimization...")
-        
-        # Essential columns to keep (needed for grouping, identification, etc.)
-        essential_string_cols = [
-            'symbol',  # Essential for grouping and identification
-            'interval_timestamp',  # Essential for time series
-        ]
-        
-        # Get all string/object columns
-        string_cols = df.select_dtypes(include=['object', 'string']).columns.tolist()
-        
-        # Identify columns to remove (non-essential string columns)
-        cols_to_remove = [col for col in string_cols if col not in essential_string_cols]
-        
-        if cols_to_remove:
-            original_shape = df.shape
-            df = df.drop(columns=cols_to_remove)
-            logger.info(f"Removed {len(cols_to_remove)} non-essential string columns")
-            logger.info(f"Shape changed from {original_shape} to {df.shape}")
-            logger.debug(f"Removed columns: {cols_to_remove}")
-        else:
-            logger.info("No non-essential string columns found to remove")
         
         # 16. Final null value cleanup
         remaining_nulls = df.isnull().sum()

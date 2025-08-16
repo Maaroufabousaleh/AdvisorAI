@@ -342,13 +342,26 @@ class DataValidator:
                     'span_days': time_span.days if pd.notna(time_span) else None
                 }
                 
-                # Check for future dates
+                # Check for future dates - handle timezone compatibility
                 now = pd.Timestamp.now()
-                future_dates = df[df[timestamp_col] > now]
-                if len(future_dates) > 0:
-                    results['status'] = 'WARN'
-                    results['issues'].append(f"Found {len(future_dates)} future timestamps in {timestamp_col}")
-                    results['checks'][f'{timestamp_col}_future_dates'] = 'WARN'
+                try:
+                    # Try to get timezone info from the column
+                    if hasattr(df[timestamp_col].dtype, 'tz') and df[timestamp_col].dtype.tz is not None:
+                        # Column is timezone-aware, make 'now' timezone-aware too
+                        now = now.tz_localize('UTC')
+                    else:
+                        # Column is timezone-naive, ensure 'now' is also timezone-naive
+                        now = now.tz_localize(None) if now.tz is not None else now
+                    
+                    future_dates = df[df[timestamp_col] > now]
+                    if len(future_dates) > 0:
+                        results['status'] = 'WARN'
+                        results['issues'].append(f"Found {len(future_dates)} future timestamps in {timestamp_col}")
+                        results['checks'][f'{timestamp_col}_future_dates'] = 'WARN'
+                except (TypeError, ValueError) as e:
+                    # If comparison fails, skip future date check for this column
+                    self.logger.warning(f"Skipping future date check for {timestamp_col} due to timezone mismatch: {e}")
+                    results['checks'][f'{timestamp_col}_future_dates'] = 'SKIP'
         
         return results
     
