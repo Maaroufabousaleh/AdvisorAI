@@ -210,8 +210,12 @@ class DataProcessor:
             if save_intermediate:
                 self._save_dataframe(stocks_df, 'stocks_03_outliers_handled.parquet')
             
-            # Step 5: Normalization
-            logger.info("Step 5: Normalizing stocks data...")
+            # Step 5: Apply data quality fixes BEFORE normalization
+            logger.info("Step 5: Applying data quality fixes...")
+            stocks_df = self._apply_data_quality_fixes(stocks_df)
+            
+            # Step 6: Normalization
+            logger.info("Step 6: Normalizing stocks data...")
             self.normalizer.fit_stocks(stocks_df)
             stocks_normalized = self.normalizer.transform_stocks(stocks_df)
             
@@ -221,18 +225,15 @@ class DataProcessor:
                 'shape_after': stocks_normalized.shape
             }
             
-            if save_intermediate:
-                self._save_dataframe(stocks_normalized, 'stocks_04_normalized_raw.parquet')
-            
-            # Step 6: Apply data quality fixes
-            logger.info("Step 6: Applying data quality fixes...")
-            stocks_normalized = self._apply_data_quality_fixes(stocks_normalized)
+            # Step 7: ML optimizations (safe for normalized data)
+            logger.info("Step 7: Applying ML optimizations...")
+            stocks_normalized = self._apply_post_normalization_ml_optimizations(stocks_normalized)
             
             if save_intermediate:
                 self._save_dataframe(stocks_normalized, 'stocks_04_normalized.parquet')
             
-            # Step 7: Final validation
-            logger.info("Step 7: Final validation...")
+            # Step 8: Final validation
+            logger.info("Step 8: Final validation...")
             final_validation = self.validator.validate_dataset(stocks_normalized, 'stocks', 'stocks_final')
             results['steps']['final_validation'] = final_validation
             
@@ -329,8 +330,12 @@ class DataProcessor:
             if save_intermediate:
                 self._save_dataframe(crypto_df, 'crypto_03_outliers_handled.parquet')
             
-            # Step 5: Normalization
-            logger.info("Step 5: Normalizing crypto data...")
+            # Step 5: Apply data quality fixes BEFORE normalization
+            logger.info("Step 5: Applying data quality fixes...")
+            crypto_df = self._apply_data_quality_fixes(crypto_df)
+            
+            # Step 6: Normalization
+            logger.info("Step 6: Normalizing crypto data...")
             self.normalizer.fit_crypto(crypto_df)
             crypto_normalized = self.normalizer.transform_crypto(crypto_df)
             
@@ -340,18 +345,15 @@ class DataProcessor:
                 'shape_after': crypto_normalized.shape
             }
             
-            if save_intermediate:
-                self._save_dataframe(crypto_normalized, 'crypto_04_normalized_raw.parquet')
-            
-            # Step 6: Apply data quality fixes
-            logger.info("Step 6: Applying data quality fixes...")
-            crypto_normalized = self._apply_data_quality_fixes(crypto_normalized)
+            # Step 7: ML optimizations (safe for normalized data)
+            logger.info("Step 7: Applying ML optimizations...")
+            crypto_normalized = self._apply_post_normalization_ml_optimizations(crypto_normalized)
             
             if save_intermediate:
                 self._save_dataframe(crypto_normalized, 'crypto_04_normalized.parquet')
             
-            # Step 7: Final validation
-            logger.info("Step 7: Final validation...")
+            # Step 8: Final validation
+            logger.info("Step 8: Final validation...")
             final_validation = self.validator.validate_dataset(crypto_normalized, 'crypto', 'crypto_final')
             results['steps']['final_validation'] = final_validation
             
@@ -600,10 +602,10 @@ class DataProcessor:
     
     def _apply_data_quality_fixes(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Apply comprehensive data quality fixes to normalized data based on validation issues.
+        Apply comprehensive data quality fixes to raw data BEFORE normalization.
         Enhanced version addressing specific validation report findings.
         """
-        logger.info("Applying enhanced data quality fixes...")
+        logger.info("Applying data quality fixes to raw data...")
         
         # 1. Add missing 'close' column if needed (critical for crypto)
         if 'close' not in df.columns:
@@ -821,7 +823,39 @@ class DataProcessor:
                         df.loc[df[col] > upper_bound, col] = upper_bound[df[col] > upper_bound]
                         logger.info(f"Capped {outlier_count} outlier values in {col}")
         
-        # 14. Create primary datetime column before removing others
+        # 14. Final null value cleanup for raw data
+        remaining_nulls = df.isnull().sum()
+        for col in remaining_nulls[remaining_nulls > 0].index:
+            if df[col].dtype in ['float64', 'float32', 'int64', 'int32']:
+                df[col] = df[col].fillna(df[col].median())
+            else:
+                df[col] = df[col].fillna('unknown')
+        
+        final_nulls = df.isnull().sum().sum()
+        logger.info(f"Data quality fixes completed on raw data. Remaining null values: {final_nulls}")
+        
+        return df
+    
+    def _apply_post_normalization_ml_optimizations(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Apply ML optimizations to normalized data without affecting the normalization.
+        These are safe operations that don't change numerical values.
+        """
+        logger.info("Applying post-normalization ML optimizations...")
+
+        # 0. Final numeric clipping to strictly enforce [-1, 1] on feature values
+        # Exclude identifier/time columns
+        id_cols = {'symbol', 'datetime_unix'}
+        num_cols = [c for c in df.columns if c not in id_cols and pd.api.types.is_numeric_dtype(df[c])]
+        if num_cols:
+            before_min = float(pd.to_numeric(df[num_cols].stack(), errors='coerce').min()) if len(num_cols) else 0.0
+            before_max = float(pd.to_numeric(df[num_cols].stack(), errors='coerce').max()) if len(num_cols) else 0.0
+            df[num_cols] = df[num_cols].clip(-1, 1)
+            after_min = float(pd.to_numeric(df[num_cols].stack(), errors='coerce').min()) if len(num_cols) else 0.0
+            after_max = float(pd.to_numeric(df[num_cols].stack(), errors='coerce').max()) if len(num_cols) else 0.0
+            logger.info(f"Final clip applied to numeric features: min {before_min:.4f}->{after_min:.4f}, max {before_max:.4f}->{after_max:.4f}")
+        
+        # 1. Create primary datetime column before removing others
         logger.info("Creating primary datetime column...")
         
         # Find the best timestamp column to use as primary datetime
@@ -841,7 +875,7 @@ class DataProcessor:
             df['datetime_unix'] = pd.to_datetime(df[primary_datetime_col], errors='coerce').astype('int64') // 10**9
             logger.info(f"Created datetime_unix from {primary_datetime_col}")
         
-        # 15. Remove non-essential string columns for ML optimization (before type conversion)
+        # 2. Remove non-essential string columns for ML optimization (before type conversion)
         logger.info("Removing non-essential string columns for ML optimization...")
         
         # Essential columns to keep (needed for grouping, identification, etc.)
@@ -884,7 +918,7 @@ class DataProcessor:
         else:
             logger.info("No non-essential string columns found to remove")
 
-        # 15. Fix data type inconsistencies for parquet compatibility
+        # 3. Fix data type inconsistencies for parquet compatibility
         logger.info("Fixing data types for parquet compatibility...")
         
         # Convert remaining object columns to string for maximum compatibility
@@ -899,32 +933,35 @@ class DataProcessor:
                     df[col] = df[col].apply(lambda x: str(x) if pd.notna(x) else 'unknown')
                     logger.debug(f"Force converted problematic column {col} to string")
         
-        # 16. Final null value cleanup
-        remaining_nulls = df.isnull().sum()
-        for col in remaining_nulls[remaining_nulls > 0].index:
-            if df[col].dtype in ['float64', 'float32', 'int64', 'int32']:
-                df[col] = df[col].fillna(df[col].median())
-            else:
-                df[col] = df[col].fillna('unknown')
+        # 4. Ensure proper column ordering: symbol first, datetime_unix second, then features
+        logger.info("Reordering columns for consistency...")
+        cols = df.columns.tolist()
         
-        # 17. Add data quality metadata (JSON-serializable)
-        df.attrs['quality_fixes_applied'] = {
-            'timestamp': pd.Timestamp.now().isoformat(),  # Convert to ISO string for JSON compatibility
-            'fixes': [
-                'Empty columns removed',
-                'RSI values normalized to 0-100',
-                'Negative volumes converted to absolute',
-                'OHLC logic violations fixed',
-                'Future timestamps corrected',
-                'Extreme price changes smoothed',
-                'Sentiment outliers capped',
-                'Chronological ordering applied'
+        # Put symbol first if it exists
+        if 'symbol' in cols:
+            cols.remove('symbol')
+            cols.insert(0, 'symbol')
+        
+        # Put datetime_unix second if it exists
+        if 'datetime_unix' in cols:
+            cols.remove('datetime_unix') 
+            cols.insert(1 if 'symbol' in df.columns else 0, 'datetime_unix')
+        
+        df = df[cols]
+        logger.info(f"Column order: {cols[:5]}...")  # Show first 5 columns
+        
+        # 5. Add data quality metadata (JSON-serializable)
+        df.attrs['ml_optimizations_applied'] = {
+            'timestamp': pd.Timestamp.now().isoformat(),
+            'optimizations': [
+                'Primary datetime column created',
+                'Non-essential string columns removed',
+                'Column ordering applied (symbol, datetime_unix, features)',
+                'Data types optimized for parquet'
             ]
         }
         
-        final_nulls = df.isnull().sum().sum()
-        logger.info(f"Enhanced data quality fixes completed. Remaining null values: {final_nulls}")
-        
+        logger.info("Post-normalization ML optimizations completed")
         return df
 
 

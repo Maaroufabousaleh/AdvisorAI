@@ -75,10 +75,10 @@ class FinancialNormalizer(BaseEstimator, TransformerMixin):
         for col in columns:
             col_lower = col.lower()
             
-            # Skip non-numeric or preserve columns
+            # Skip non-numeric, preserve, or datetime columns
             if col in self.preserve_columns:
                 categories['preserve'].append(col)
-            elif any(term in col_lower for term in ['symbol', 'timestamp', 'date']):
+            elif any(term in col_lower for term in ['symbol', 'timestamp', 'date', 'datetime_unix', 'unix']):
                 categories['preserve'].append(col)
             # Price-related features
             elif any(term in col_lower for term in ['price', 'close', 'open', 'high', 'low', 'ask', 'bid']):
@@ -114,9 +114,11 @@ class FinancialNormalizer(BaseEstimator, TransformerMixin):
         if scaling_method == 'standard':
             return StandardScaler()
         elif scaling_method == 'minmax':
-            return MinMaxScaler()
+            return MinMaxScaler(feature_range=(-1, 1))  # Scale to [-1, 1]
         elif scaling_method == 'robust':
-            return RobustScaler()
+            # Use more extreme quantiles for better outlier handling
+            return RobustScaler(with_centering=True, with_scaling=True, 
+                              quantile_range=(1.0, 99.0))
         elif scaling_method == 'quantile':
             return QuantileTransformer(output_distribution='normal', random_state=42)
         elif scaling_method == 'power':
@@ -175,13 +177,13 @@ class FinancialNormalizer(BaseEstimator, TransformerMixin):
     
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """
-        Transform the data using fitted scalers.
+        Transform the data using fitted scalers and ensure values are within [-1, 1].
         
         Args:
             X: Input DataFrame
             
         Returns:
-            Transformed DataFrame
+            Transformed DataFrame with all numeric values clipped to [-1, 1]
         """
         if not self.fitted_:
             raise ValueError("Normalizer must be fitted before transform")
@@ -194,7 +196,21 @@ class FinancialNormalizer(BaseEstimator, TransformerMixin):
             if columns:
                 try:
                     # Transform and update the DataFrame
-                    X_transformed[columns] = scaler.transform(X[columns])
+                    transformed_values = scaler.transform(X[columns])
+                    
+                    # Ensure all values are within [-1, 1] using percentile-based clipping
+                    if category in ['volume', 'returns', 'indicators', 'ratios']:
+                        # Calculate safe clipping thresholds based on data distribution
+                        lower_percentile = np.percentile(transformed_values, 1)  # 1st percentile
+                        upper_percentile = np.percentile(transformed_values, 99)  # 99th percentile
+                        scale_factor = max(abs(lower_percentile), abs(upper_percentile))
+                        if scale_factor > 1:
+                            transformed_values = transformed_values / scale_factor
+                    
+                    # Final safety clip to ensure absolute bounds
+                    transformed_values = np.clip(transformed_values, -1, 1)
+                    X_transformed[columns] = transformed_values
+                    
                 except Exception as e:
                     logger.error(f"Error transforming {category} features: {e}")
                     # Keep original values if transformation fails
@@ -296,14 +312,17 @@ class LogStandardScaler(BaseEstimator, TransformerMixin):
         self.scaler = StandardScaler()
         
     def fit(self, X, y=None):
-        """Fit the log-standard scaler."""
-        X_log = np.log(X + self.offset)
+        """Fit the log-standard scaler with safe log handling (no -inf/NaN)."""
+        # Ensure strictly positive input to log by flooring at a tiny epsilon
+        X_safe = np.maximum(X + self.offset, 1e-12)
+        X_log = np.log(X_safe)
         self.scaler.fit(X_log)
         return self
     
     def transform(self, X):
-        """Transform using log then standard scaling."""
-        X_log = np.log(X + self.offset)
+        """Transform using log then standard scaling with safe log handling."""
+        X_safe = np.maximum(X + self.offset, 1e-12)
+        X_log = np.log(X_safe)
         return self.scaler.transform(X_log)
     
     def inverse_transform(self, X):
